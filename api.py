@@ -6,10 +6,12 @@ import flask_bcrypt
 # import flask_jwt
 import jwt
 import json
+
+from werkzeug.datastructures import ResponseCacheControl
 import db
 import hashlib
 import uuid
-import datetime
+import time
 
 #setup bcrypt and jwt
 # def jwt_authenticate(username, password):
@@ -28,10 +30,30 @@ def test():
 
 #auth routes
 def requires_auth(func):
-    @wraps
+    @wraps(func)
     def req_auth_wrapper(*args, **kwargs):
+        token_e = request.headers.get('token', None)
+        if token_e:
+            try:
+                token = jwt.decode(token_e, current_app.config['SECRET_KEY'], algorithms="HS256")
+            except Exception as exc:
+                return Response(f"{{'error': '{type(exc).__name__}: {exc}'}}")
+            if time.time() * 1000 > token['exp']:
+                return Response("{'error': 'token expired'}", 401)
+            
+            dbo = db.get_db()
+            table = dbo.cursor()
+            user_password = table.execute("SELECT password FROM user WHERE id=?", (token['sub'],)).fetchone()
 
-        return func(*args, **kwargs)
+            if not current_app.bcrypt.check_password_hash(user_password['password'].encode('utf8'), token['pwdsha']):
+                return Response("'error': 'invalid token'}", 401)
+            
+            return func(*args, **kwargs)
+            
+        else:
+            return Response("token not supplied", 403)
+    return req_auth_wrapper
+        
 
 
 @bp.route('/adduser', methods=['POST'])
@@ -40,7 +62,7 @@ def add_user():
     #note that you need to manually sign in afterwards
     print(request.is_json)
     if not request.is_json:
-        return Response("{'error': 'input must be json'}", 400, mimetype='application/json')
+        return Response("{'error': 'input must be json', 'note': 'did you forget to set the content-type header?'}", 400, mimetype='application/json')
     data = request.json
     new_user_name = data['username'].lower() #case sensitivity is bad. Might remove later
     new_user_password = data['password']
@@ -90,16 +112,19 @@ def sign_in():
     if not current_app.bcrypt.check_password_hash(hashed_storage_password.encode('utf8'), hashed_input_password):
         return Response("Password is incorrect", 401)
     token_data = {
-        'id': user['id'],
-        'password': user['password']
-    }
-    encrypted_token = jwt.encode(token_data, current_app.config['SECRET_KEY'])
+        'sub': user['id'],
+        'exp': (time.time() * 1000) + (30 * 24 * 60 * 60 * 1000), #days * hr/day * min/hr * sec/min * ms/sec
+        'iat': time.time() * 1000,
+        'pwdsha': hashed_input_password,
+    } #I hope this is safe
+    encrypted_token = jwt.encode(token_data, current_app.config['SECRET_KEY'], algorithm="HS256")
     resp = Response(encrypted_token, 200)
     # resp.set_cookie('auth-token', encrypted_token, max_age=datetime.timedelta(days=30), httponly=True)
     return resp
     
 @bp.route("/testauth")
 # @flask_jwt.jwt_required()
+@requires_auth
 def test_auth():
     print("Ok")
     return Response("Ok", 200)
